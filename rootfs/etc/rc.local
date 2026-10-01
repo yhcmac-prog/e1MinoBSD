@@ -1,0 +1,39 @@
+#!/bin/sh
+# e1MinoBSD local boot hook (executed by /etc/rc.d/local)
+
+# Live media only: writable layers over the read-only CD.
+roottype=$(mount -p | awk '$2=="/" {print $3; exit}')
+if [ "$roottype" = cd9660 ]; then
+    . /etc/brand.conf
+    variant=$(printf '%s' "$VARIANT" | tr -d '"')
+    # Minimal media: third-party packages live under /usr/local; give it a
+    # writable tmpfs. Desktop media already carries the full /usr/local tree.
+    if [ "$variant" != desktop ]; then
+        if ! mount | grep -q ' on /usr/local '; then
+            mount -t tmpfs tmpfs /usr/local
+        fi
+    fi
+    if ! mount | grep -q ' on /root '; then
+        mount -t tmpfs tmpfs /root
+    fi
+    printf '\ne1MinoBSD %s (%s) live media - FreeBSD %s %s\n' \
+        "$VERSION" "$CODENAME" "$(freebsd-version)" "$(uname -m)"
+    printf 'Login as root (no password). Run "setup-minobsd" to install.\n\n'
+fi
+
+# Automatic installation hook (loader: set minobsd.autosetup="YES")
+# The interactive loader keeps quotes literally; strip them.
+auto=$(kenv minobsd.autosetup 2>/dev/null | tr -d '"' || true)
+case "$auto" in
+    YES|yes|1)
+        fs=$(kenv minobsd.fs 2>/dev/null | tr -d '"')
+        [ -z "$fs" ] && fs=ufs
+        disk=$(kenv minobsd.disk 2>/dev/null | tr -d '"')
+        echo "==> autosetup requested: fs=$fs ${disk:+disk=$disk}"
+        # shellcheck disable=SC2086
+        setup-minobsd --auto --fs "$fs" ${disk:+--disk "$disk"} 2>&1 \
+            | tee /var/log/autosetup.log
+        ;;
+esac
+
+exit 0

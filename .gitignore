@@ -1,0 +1,14 @@
+# Build artifacts and large binaries (hosted via GitHub Releases, not git)
+build/
+downloads/
+.vbox/
+.DS_Store
+
+# Compiled intermediates in package sources (keep payload + meta + .c/.h)
+packages/src/e1wm/e1wm
+packages/src/e1wm/e1wm.o
+
+# Sparse disk images
+*.sparseimage
+*.iso
+*.iso.part-*

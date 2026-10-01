@@ -1,0 +1,46 @@
+#!/bin/sh
+# deskselect - choose the desktop environment
+# Choices: e1wm-workstation e1wm-mobile mate xfce gershwin
+DESKS="e1wm-workstation e1wm-mobile mate xfce gershwin"
+
+set_choice() {
+    case "$1" in
+        e1wm-workstation) echo workstation > /etc/e1mode ;;
+        e1wm-mobile)      echo mobile > /etc/e1mode ;;
+    esac
+    echo "$1" > /etc/e1desk
+
+    # Persist the X session for LightDM/AccountsService (xsessions IDs).
+    case "$1" in
+    mate|xfce|gershwin)
+        mkdir -p /var/lib/AccountsService/users
+        # Existing xsession IDs: mate, xfce, gershwin
+        printf '[User]\nSession=%s\n' "$1" \
+            > /var/lib/AccountsService/users/root
+        ;;
+    esac
+    echo "Desktop set to: $1"
+}
+
+if [ $# -eq 1 ]; then
+    for d in $DESKS; do
+        [ "$1" = "$d" ] && { set_choice "$1"; exit 0; }
+    done
+    echo "Unknown desktop: $1" >&2
+    echo "Choices: $DESKS" >&2
+    exit 1
+fi
+
+echo "Select desktop environment:"
+i=1
+for d in $DESKS; do echo "  $i) $d"; i=$((i + 1)); done
+printf "Enter number: "
+read n
+set -- $DESKS
+i=1
+for d in $DESKS; do
+    [ "$i" = "$n" ] && { set_choice "$d"; exit 0; }
+    i=$((i + 1))
+done
+echo "Invalid selection" >&2
+exit 1

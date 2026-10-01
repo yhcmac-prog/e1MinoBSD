@@ -1,0 +1,288 @@
+#!/bin/sh
+# setup-minobsd - e1MinoBSD system installer
+# Usage: setup-minobsd                interactive
+#        setup-minobsd --auto [--fs ufs|zfs] [--disk <dev>] [--hostname <n>]
+#                            [--swap <size>] [--password <pw>]
+#
+# Partitions the target disk, deploys base.txz + kernel.txz from
+# /usr/freebsd-dist and applies the e1MinoBSD brand layer.
+
+set -u
+
+MNT=/tmp/install
+DIST=/usr/freebsd-dist
+
+G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; N='\033[0m'
+
+info()  { printf "%b>>%b %s\n" "$G" "$N" "$*"; }
+warn()  { printf "%b!!%b %s\n" "$Y" "$N" "$*"; }
+die()   { printf "%bERROR:%b %s\n" "$R" "$N" "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- args
+AUTO=0; FS=; DISK=; HN=; SWAP=512m; PW=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --auto)     AUTO=1 ;;
+        --fs)       shift; FS=$1 ;;
+        --disk)     shift; DISK=$1 ;;
+        --hostname) shift; HN=$1 ;;
+        --swap)     shift; SWAP=$1 ;;
+        --password) shift; PW=$1 ;;
+        *) die "unknown option: $1" ;;
+    esac
+    shift
+done
+[ -z "$FS" ] && FS=ufs
+case "$FS" in ufs|zfs) ;; *) die "filesystem must be ufs or zfs, got: $FS" ;; esac
+
+# ------------------------------------------------------------- helpers
+list_disks() {
+    geom disk status 2>/dev/null | awk 'NR>1 {print $1}' \
+        | grep -v '^cd' | sort
+}
+
+ask() { # ask "Prompt" default varname
+    _q=$1; _d=$2
+    if [ -n "$_d" ]; then printf '%s [%s]: ' "$_q" "$_d"; else printf '%s: ' "$_q"; fi
+    read -r _a || _a=
+    [ -z "$_a" ] && _a=$2
+    eval "$3=\$_a"
+}
+
+cleanup() {
+    _st=$?
+    if mount | grep -q "on $MNT "; then
+        umount -f "$MNT" 2>/dev/null || true
+    fi
+    return $_st
+}
+trap cleanup EXIT INT TERM
+
+# ------------------------------------------------------- preconditions
+[ -f "$DIST/base.txz" ]   || die "$DIST/base.txz missing (installer media damaged?)"
+[ -f "$DIST/kernel.txz" ] || die "$DIST/kernel.txz missing"
+[ "$(id -u)" = 0 ] || die "must be run as root"
+. /etc/brand.conf 2>/dev/null || true
+
+# ------------------------------------------------------------ questions
+if [ "$AUTO" = 0 ]; then
+    # HN deliberately starts EMPTY (never prefill from a preset hostname)
+    while [ -z "$HN" ]; do
+        ask "Hostname" "" HN
+        [ -z "$HN" ] && warn "hostname is required"
+    done
+    ask "Root password (input hidden)" "minobsd" PW
+    disks=$(list_disks)
+    [ -n "$disks" ] || die "no disks found"
+    printf '\nAvailable disks:\n'
+    n=0
+    for d in $disks; do
+        n=$((n+1)); size=$(diskinfo -v "/dev/$d" 2>/dev/null \
+            | awk '/# bytes/{print $(NF-2); exit}')
+        printf '  %d) %s\n' "$n" "$d"
+    done
+    ask "Select disk number" "1" SEL
+    n=0
+    for d in $disks; do
+        n=$((n+1)); [ "$n" = "$SEL" ] && DISK=$d
+    done
+    [ -n "$DISK" ] || die "invalid disk selection"
+    ask "Filesystem (ufs/zfs)" "ufs" FS
+    case "$FS" in ufs|zfs) ;; *) die "invalid filesystem: $FS" ;; esac
+    ask "Swap size (0 to disable)" "512m" SWAP
+    printf '\nWARNING: %s will be COMPLETELY ERASED.\n' "/dev/$DISK"
+    ask 'Type "YES" to continue' "" CONFIRM
+    [ "$CONFIRM" = YES ] || die "aborted"
+else
+    [ -z "$HN" ] && HN=e1minobsd
+    if [ -z "$DISK" ]; then
+        disks=$(list_disks)
+        set -- $disks
+        [ $# -ge 1 ] || die "no disks found"
+        if [ $# -gt 1 ]; then
+            die "multiple disks present ($disks); use --disk <dev>"
+        fi
+        DISK=$1
+    fi
+fi
+[ -z "$PW" ] && PW=minobsd
+# FreeBSD GEOM disk nodes are character-special devices
+[ -c "/dev/$DISK" ] || die "disk /dev/$DISK does not exist"
+
+printf '\n=== e1MinoBSD installation ===\n'
+info "Target disk: /dev/$DISK   Filesystem: $FS   Hostname: $HN"
+
+# ------------------------------------------------------------- partition
+info "Creating GPT partition scheme"
+gpart destroy -F "/dev/$DISK" >/dev/null 2>&1 || true
+gpart create -s GPT "/dev/$DISK" >/dev/null
+gpart add -t freebsd-boot -l boot0 -s 512K -a 4k "/dev/$DISK" >/dev/null
+
+# ---------------------------------------------------------------- UFS
+if [ "$FS" = ufs ]; then
+    if [ "$SWAP" != 0 ]; then
+        gpart add -t freebsd-swap -l swap0 -s "$SWAP" -a 4k "/dev/$DISK" >/dev/null
+    fi
+    gpart add -t freebsd-ufs -l root0 -a 4k "/dev/$DISK" >/dev/null
+
+    info "Writing bootcode (pmbr + gptboot)"
+    gpart bootcode -b /boot/pmbr -p /boot/gptboot -i 1 "/dev/$DISK" >/dev/null
+
+    info "Creating UFS root filesystem with SUJ"
+    newfs -U -L root0 /dev/gpt/root0 >/dev/null
+
+    mkdir -p "$MNT"
+    mount /dev/gpt/root0 "$MNT" || die "failed to mount target root"
+
+# ---------------------------------------------------------------- ZFS
+else
+    gpart add -t freebsd-zfs -l zfs0 -a 4k "/dev/$DISK" >/dev/null
+
+    info "Writing bootcode (pmbr + gptzfsboot)"
+    gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 1 "/dev/$DISK" >/dev/null
+
+    # zpool may already exist from a previous run
+    zpool destroy zroot >/dev/null 2>&1 || true
+    info "Creating zroot pool (ashift=12)"
+    zpool create -f -o altroot="$MNT" -o cachefile=none -o ashift=12 \
+        zroot /dev/gpt/zfs0 || die "zpool create failed"
+
+    info "Creating boot environment datasets"
+    zfs set mountpoint=none canmount=off zroot
+    zfs create -o canmount=off -o mountpoint=/ zroot/ROOT
+    zfs create -o canmount=noauto -o mountpoint=/ zroot/ROOT/default
+    zfs mount zroot/ROOT/default
+    zfs create -o mountpoint=/tmp -o setuid=off zroot/tmp
+    zfs create -o mountpoint=/usr zroot/usr
+    zfs create -o mountpoint=/usr/home zroot/usr/home
+    zfs create -o mountpoint=/var -o canmount=off zroot/var
+    zfs create -o mountpoint=/var/audit -o exec=off -o setuid=off zroot/var/audit
+    zfs create -o mountpoint=/var/crash zroot/var/crash
+    zfs create -o mountpoint=/var/log -o exec=off -o setuid=off zroot/var/log
+    zfs create -o mountpoint=/var/mail -o atime=on zroot/var/mail
+    zfs create -o mountpoint=/var/tmp -o setuid=off zroot/var/tmp
+    zfs mount -a
+    mkdir -p "$MNT/tmp" "$MNT/var/tmp"
+    chmod 1777 "$MNT/tmp" "$MNT/var/tmp"
+    zpool set bootfs=zroot/ROOT/default zroot
+fi
+
+# ---------------------------------------------------------------- deploy
+info "Extracting base.txz"
+tar -xpf "$DIST/base.txz" -C "$MNT" || die "failed to extract base"
+info "Extracting kernel.txz"
+tar -xpf "$DIST/kernel.txz" -C "$MNT" || die "failed to extract kernel"
+
+# remove stock motd template (login(1) would append it otherwise)
+rm -f "$MNT/etc/motd.template"
+
+# e1MinoBSD brand + tooling layer from the running live system
+info "Applying e1MinoBSD configuration"
+tar -C / -cf - \
+    etc/brand.conf etc/motd etc/issue etc/ttys etc/rc.local \
+    etc/e1pkg.conf usr/bin/e1pkg etc/pkg/FreeBSD.conf boot/loader.conf \
+    srv/repo 2>/dev/null | tar -C "$MNT" -xpf -
+mkdir -p "$MNT/var/lib/e1pkg" "$MNT/var/cache/e1pkg"
+
+# Desktop media: copy the pre-staged package payload tree and desktop config
+variant=$(printf '%s' "${VARIANT:-minimal}" | tr -d '"')
+if [ "$variant" = desktop ]; then
+    info "Deploying desktop payload tree (/usr/local, /System)"
+    mkdir -p "$MNT/usr/local"
+    (cd /usr/local && tar cf - .) \
+        | (cd "$MNT/usr/local" && tar --no-same-owner -xmf -) \
+        || die "failed to deploy desktop tree"
+    [ -d /System ] && (cd / && tar cf - System) \
+        | (cd "$MNT" && tar --no-same-owner -xpf -)
+    tar -C / -cf - etc/e1desk etc/rc.conf.d 2>/dev/null \
+        | tar -C "$MNT" -xpf -
+fi
+
+# ---------------------------------------------------------------- target config
+cat > "$MNT/etc/rc.conf" <<EOF
+# e1MinoBSD system configuration
+hostname="$HN"
+ifconfig_DEFAULT="DHCP"
+background_dhclient="YES"
+sshd_enable="NO"
+sendmail_enable="NONE"
+sendmail_submit_enable="NO"
+sendmail_outbound_enable="NO"
+sendmail_msp_queue_enable="NO"
+local_unbound_enable="NO"
+EOF
+if [ "$FS" = zfs ]; then
+    printf 'zfs_enable="YES"\n' >> "$MNT/etc/rc.conf"
+fi
+
+if [ "$FS" = ufs ]; then
+    cat > "$MNT/etc/fstab" <<EOF
+# Device                       Mountpoint  FStype  Options  Dump Pass
+/dev/gpt/root0                  /           ufs     rw       1    1
+EOF
+    if [ "$SWAP" != 0 ]; then
+        printf '/dev/gpt/swap0                  none        swap    sw       0    0\n' \
+            >> "$MNT/etc/fstab"
+    fi
+    # installed system does not use memory filesystems
+else
+    printf '# e1MinoBSD (ZFS) - filesystems are managed by the zroot pool\n' \
+        > "$MNT/etc/fstab"
+    printf '\nzfs_load="YES"\n' >> "$MNT/boot/loader.conf"
+fi
+
+# Installed-system branding (the overlay files describe the live media)
+printf '%s %s (%s)\n' "$NAME" "$VERSION" "$CODENAME" > "$MNT/etc/issue"
+cat > "$MNT/etc/motd" <<EOF
+  ___ _  __ _ _  _ ___ ___  ___  ___
+ / -_) ' \\ _\` | || |_  / _ \\/ _ \\/ -_)
+ \\___|_||_\\__, |\\_,_/___\\___/\\___\\___/
+             |_|
+
+ Welcome to $NAME $VERSION ($CODENAME) - a new BSD distribution
+ Built on FreeBSD $(freebsd-version).
+
+ * Package manager : e1pkg (e1MinoBSD) / pkg (FreeBSD)
+EOF
+
+info "Setting root password"
+printf '%s\n' "$PW" | chroot "$MNT" /usr/sbin/pw usermod root -h 0 \
+    || die "failed to set root password"
+
+# Desktop service accounts required by the pre-staged packages.
+if [ "$variant" = desktop ]; then
+    info "Creating desktop service accounts"
+    mkgroup() {
+        chroot "$MNT" /usr/sbin/pw groupshow "$1" >/dev/null 2>&1 \
+            || chroot "$MNT" /usr/sbin/pw groupadd "$1"
+    }
+    mkuser() { # <user> [extra groups]
+        chroot "$MNT" /usr/sbin/pw usershow "$1" >/dev/null 2>&1 \
+            || chroot "$MNT" /usr/sbin/pw useradd "$1" -c "$1 daemon" \
+                   -d /nonexistent -s /usr/sbin/nologin ${2:+-G "$2"}
+    }
+    mkgroup video
+    for g in messagebus lightdm avahi polkitd cups colord; do mkgroup "$g"; done
+    mkuser messagebus
+    mkuser lightdm video
+    mkuser avahi
+    mkuser polkitd
+    mkuser cups
+    mkuser colord
+fi
+
+# -------------------------------------------------------------- finalize
+if [ "$FS" = zfs ]; then
+    info "Exporting zroot (will be imported automatically on first boot)"
+    zfs umount zroot/var/tmp zroot/var/mail zroot/var/log zroot/var/crash \
+        zroot/var/audit zroot/var zroot/usr/home zroot/usr zroot/tmp 2>/dev/null
+    zfs umount zroot/ROOT/default 2>/dev/null
+    zpool export zroot || die "zpool export failed"
+else
+    umount "$MNT" || die "failed to unmount target"
+fi
+
+printf '\n%bInstallation complete!%b\n' "$G" "$N"
+printf 'Remove the installation media and reboot.\n'
+trap - EXIT INT TERM
+exit 0

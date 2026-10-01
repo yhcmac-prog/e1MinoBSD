@@ -1,0 +1,13 @@
+#!/bin/sh
+# Gershwin X session: launch Workspace, then exec the WindowManager.
+WM=/System/Library/CoreServices/Applications/WindowManager.app/WindowManager
+WS=/System/Applications/Workspace.app/Workspace
+
+if [ ! -x "$WM" ]; then
+    echo "gershwin-session: WindowManager not found at $WM" >&2
+    exit 1
+fi
+if [ -x "$WS" ]; then
+    "$WS" &
+fi
+exec "$WM"

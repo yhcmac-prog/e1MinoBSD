@@ -1,0 +1,4 @@
+name=cowsay
+version=1.0
+summary=e1MinoBSD talking cow demo
+depends=

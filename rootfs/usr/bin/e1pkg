@@ -1,0 +1,261 @@
+#!/bin/sh
+# e1pkg — e1MinoBSD package manager (dnf-style)
+# Repository format: one line name|version|summary|depends|filename
+# Package format:   tar.gz containing meta and payload/
+# Install database: /var/lib/e1pkg/installed/<name> and <name>.files
+# Note: user-visible output is English only.
+
+CONF=/etc/e1pkg.conf
+INSTDIR=/var/lib/e1pkg/installed
+CACHE=/var/cache/e1pkg
+REPODIR=/srv/repo
+DB=$REPODIR/repo.db
+
+B='\033[1m'; G='\033[32m'; R='\033[31m'; Y='\033[33m'; N='\033[0m'
+
+usage() {
+cat <<EOF
+e1pkg 1.0.0 — package manager for e1MinoBSD (dnf-style)
+
+Usage: e1pkg <command> [args...]
+
+Commands:
+  install <pkg>...     Install packages (resolves dependencies)
+  remove <pkg>...      Remove packages (checks reverse dependencies)
+  upgrade              Upgrade all installed packages
+  search <keyword>     Search packages in the repository
+  info <pkg>           Show package details
+  list installed       List installed packages
+  list available       List packages available in the repo
+  list repos           List repositories
+  repolist             Same as list repos
+  clean                Clean the download cache
+  help                 Show this help
+EOF
+}
+
+die() { printf "%b e1pkg error: %s%b\n" "$R" "$1" "$N" >&2; exit 1; }
+
+# Select repository: walk every record in conf and use the first usable one.
+# URL sources serve $URL/repo.db and $URL/packages/<filename>.
+load_repo() {
+    while IFS='|' read -r id name path; do
+        case "$id" in ''|\#*) continue ;; esac
+        case "$path" in
+            http://*|https://*)
+                mkdir -p "$CACHE"
+                if fetch -q -T 5 -o "$CACHE/repo.db" "$path/repo.db" 2>/dev/null; then
+                    REPODIR=$path; DB=$CACHE/repo.db; return 0
+                fi ;;
+            *)
+                if [ -f "$path/repo.db" ]; then
+                    REPODIR=$path; DB=$path/repo.db; return 0
+                fi ;;
+        esac
+    done < "$CONF"
+    die "no usable repository, check $CONF"
+}
+
+# Query repo.db: query_repo <name> -> name|version|summary|depends|filename
+query_repo() {
+    grep -h "^$1|" "$DB" 2>/dev/null | head -n 1
+}
+
+# Collect dependencies (packages themselves included), deps first (post-order)
+resolve() {
+    _resolve_list=""
+    _walk() {
+        case " $_resolve_list " in *" $1 "*) return 0 ;; esac
+        _row=$(query_repo "$1")
+        [ -z "$_row" ] && die "package not found in repo: '$1'"
+        _deps=$(echo "$_row" | cut -d'|' -f4)
+        for d in $_deps; do [ -n "$d" ] && _walk "$d"; done
+        case " $_resolve_list " in *" $1 "*) ;; *) _resolve_list="$_resolve_list $1" ;; esac
+    }
+    for p in "$@"; do _walk "$p"; done
+    echo $_resolve_list | tr ' ' '\n' | grep -v '^$'
+}
+
+is_installed() { [ -f "$INSTDIR/$1" ]; }
+
+pkg_field() { # <pkg> <field> <dbfile>
+    grep "^$2=" "$3" 2>/dev/null | head -n 1 | cut -d= -f2-
+}
+
+cmd_install() {
+    [ $# -ge 1 ] || { usage; exit 1; }
+    todo=""
+    for p in "$@"; do
+        if is_installed "$p"; then
+            printf "%bAlready installed%b %s, skipping\n" "$Y" "$N" "$p"; continue
+        fi
+        todo="$todo $p"
+    done
+    [ -z "$(echo $todo | tr -d ' ')" ] && { printf "Nothing to do.\n"; return 0; }
+
+    all=$(resolve $todo) || exit 1
+    case "$REPODIR" in
+        http://*|https://*) srctag=net ;;
+        *) srctag=local ;;
+    esac
+    printf "\n================================================================================\n"
+    printf " %bPackage%b                Arch      Version    Repo         Size\n" "$B" "$N"
+    printf "================================================================================\n"
+    printf " Installing:\n"
+    total=0
+    for p in $all; do
+        row=$(query_repo "$p") || exit 1
+        name=$(echo "$row" | cut -d'|' -f1)
+        ver=$(echo "$row"  | cut -d'|' -f2)
+        fname=$(echo "$row" | cut -d'|' -f5)
+        sz=$(stat -f %z "$CACHE/$fname" 2>/dev/null)
+        [ -n "$sz" ] || sz=$(stat -f %z "$REPODIR/$fname" 2>/dev/null || echo 0)
+        szk=$(( (sz + 1023) / 1024 ))
+        printf "  %-20s %-9s %-10s %-12s %d k\n" "$name" "noarch" "$ver" "$srctag" "$szk"
+        total=$((total + szk))
+    done
+    printf "================================================================================\n"
+    printf " Installing %d package(s), %d k total\n\n" "$(echo $all | wc -w)" "$total"
+
+    mkdir -p "$CACHE" "$INSTDIR"
+    for p in $all; do
+        row=$(query_repo "$p") || exit 1
+        fname=$(echo "$row" | cut -d'|' -f5)
+        printf "%bInstalling:%b %s\n" "$G" "$N" "$p"
+        case "$REPODIR" in
+            http://*|https://*)
+                fetch -q -T 60 -o "$CACHE/$fname" "$REPODIR/packages/$fname" \
+                    || die "failed to download $fname" ;;
+            *) cp "$REPODIR/$fname" "$CACHE/" || die "cannot read package file $fname" ;;
+        esac
+        tmp=$(mktemp -d /tmp/e1pkg.XXXXXX) || die "cannot create temp dir"
+        tar -xzf "$CACHE/$fname" -C "$tmp" || die "failed to extract $p"
+        (cd "$tmp/payload" 2>/dev/null && find . \( -type f -o -type l \)) \
+            | sed 's|^\./||' > "$INSTDIR/$p.files"
+        # -m: do not restore mtimes (avoids touching RO dirs / and /usr)
+        (cd "$tmp/payload" && tar cf - .) \
+            | (cd / && tar --no-same-owner -xmf -)
+        cp "$tmp/meta" "$INSTDIR/$p"
+        chmod +x /usr/local/bin/$p 2>/dev/null
+        rm -rf "$tmp"
+    done
+    printf "%bComplete!%b\n" "$G" "$N"
+}
+
+cmd_remove() {
+    [ $# -ge 1 ] || { usage; exit 1; }
+    for p in "$@"; do
+        is_installed "$p" || die "package $p is not installed"
+        needed=""
+        for m in "$INSTDIR"/*; do
+            [ -f "$m" ] || continue
+            other=${m##*/}
+            [ "$other" = "$p" ] && continue
+            case ",$(pkg_field "$other" depends "$m")," in
+                *",$p,"*) needed="$needed $other" ;;
+            esac
+        done
+        [ -n "$needed" ] && die "$p is required by:$needed"
+        printf "%bRemoving:%b %s\n" "$G" "$N" "$p"
+        for f in $(cat "$INSTDIR/$p.files" 2>/dev/null); do
+            rm -f "/$f" 2>/dev/null
+        done
+        rm -f "$INSTDIR/$p" "$INSTDIR/$p.files"
+    done
+    printf "%bComplete!%b\n" "$G" "$N"
+}
+
+cmd_upgrade() {
+    n=0
+    for m in "$INSTDIR"/*; do
+        [ -f "$m" ] || continue
+        p=${m##*/}
+        case "$p" in *.files) continue ;; esac
+        row=$(query_repo "$p")
+        [ -z "$row" ] && continue
+        rver=$(echo "$row" | cut -d'|' -f2)
+        iver=$(pkg_field "$p" version "$m")
+        if [ "$rver" != "$iver" ]; then
+            printf "%bUpgrading:%b %s %s -> %s\n" "$G" "$N" "$p" "$iver" "$rver"
+            rm -f "$INSTDIR/$p"   # allow reinstall
+            n=$((n+1))
+        fi
+    done
+    if [ $n -gt 0 ]; then
+        args=""
+        for m in "$INSTDIR"/*; do
+            [ -f "$m" ] || continue
+            case ${m##*/} in *.files) continue ;; esac
+            args="$args ${m##*/}"
+        done
+        # shellcheck disable=SC2086
+        cmd_install $args
+    else
+        printf "All packages are up to date.\n"
+    fi
+}
+
+cmd_search() {
+    [ $# -ge 1 ] || die "search requires a keyword"
+    grep -ih "$1" "$DB" 2>/dev/null | while IFS='|' read -r n v s d f; do
+        printf "%b%s%b-%s : %s\n" "$B" "$n" "$N" "$v" "$s"
+    done
+}
+
+cmd_info() {
+    [ $# -ge 1 ] || die "info requires a package name"
+    row=$(query_repo "$1")
+    [ -z "$row" ] && die "package not found: $1"
+    name=$(echo "$row" | cut -d'|' -f1)
+    ver=$(echo "$row"  | cut -d'|' -f2)
+    sum=$(echo "$row"  | cut -d'|' -f3)
+    dep=$(echo "$row"  | cut -d'|' -f4)
+    printf "Name     : %b%s%b\nVersion  : %s\nSummary  : %s\nDepends  : %s\nRepo     : local\nInstalled: %s\n" \
+        "$B" "$name" "$N" "$ver" "$sum" "${dep:--}" "$(is_installed "$1" && echo yes || echo no)"
+}
+
+cmd_list() {
+    case "$1" in
+        installed)
+            [ -d "$INSTDIR" ] || die "no packages installed yet"
+            for m in "$INSTDIR"/*; do
+                [ -f "$m" ] || continue
+                case ${m##*/} in *.files) continue ;; esac
+                printf "%b%s%b %s\n" "$B" "${m##*/}" "$N" "$(pkg_field "${m##*/}" version "$m")"
+            done ;;
+        available)
+            cut -d'|' -f1,2 "$DB" 2>/dev/null \
+                | while IFS='|' read -r n v; do printf "%b%s%b %s\n" "$B" "$n" "$N" "$v"; done ;;
+        repos|'')
+            while IFS='|' read -r id name path; do
+                case "$id" in \#*|'') continue ;; esac
+                printf "repo id  : %b%s%b\nname     : %s\npath     : %s\n\n" "$B" "$id" "$N" "$name" "$path"
+            done < "$CONF" ;;
+        *) die "unknown list type: $1 (use: installed / available / repos)" ;;
+    esac
+}
+
+cmd_clean() {
+    rm -rf "$CACHE" && mkdir -p "$CACHE"
+    printf "Download cache cleared: %s\n" "$CACHE"
+}
+
+main() {
+    [ -d /var/lib/e1pkg ] || mkdir -p /var/lib/e1pkg/installed "$CACHE" 2>/dev/null
+    load_repo
+    cmd="${1:-help}"; shift 2>/dev/null
+    case "$cmd" in
+        install)  cmd_install "$@" ;;
+        remove)   cmd_remove "$@" ;;
+        upgrade)  cmd_upgrade "$@" ;;
+        search)   cmd_search "$@" ;;
+        info)     cmd_info "$@" ;;
+        list)     cmd_list "$@" ;;
+        repolist) cmd_list repos ;;
+        clean)    cmd_clean "$@" ;;
+        -h|--help|help|'') usage ;;
+        *) usage; exit 1 ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,13 @@
+#!/bin/sh
+msg="$*"
+[ -n "$msg" ] || msg="Moo!"
+len=${#msg}
+line=$(printf '%*s' "$len" '' | tr ' ' '-')
+echo " $line"
+echo "<$msg>"
+echo " $line"
+echo "        \   ^__^"
+echo "         \  (oo)\_______"
+echo "            (__)\       )\\/\\"
+echo "                ||----w |"
+echo "                ||     ||"

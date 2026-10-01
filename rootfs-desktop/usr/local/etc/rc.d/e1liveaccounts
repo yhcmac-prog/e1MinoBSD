@@ -1,0 +1,110 @@
+#!/bin/sh
+#
+# PROVIDE: e1liveaccounts
+# REQUIRE: mountcritlocal
+# BEFORE: dbus
+# KEYWORD: nojail
+
+# On read-only live media the desktop service accounts cannot be created at
+# install time. Build them in a writable shadow tree (plain appends, since
+# "pw -R" cannot lock on this layout), run pwd_mkdb, then nullfs-mount the
+# password files over the read-only originals before dbus starts.
+
+. /etc/rc.subr
+
+name="e1liveaccounts"
+rcvar="e1liveaccounts_enable"
+start_cmd="e1liveaccounts_start"
+load_rc_config $name
+: ${e1liveaccounts_enable:="NO"}
+
+e1liveaccounts_start()
+{
+    local rootdev R maxgid maxuid id
+
+    rootdev=$(mount -p | awk '$2 == "/" { print $1 }')
+    case "$rootdev" in
+    /dev/iso9660/*|/dev/cd*)
+        ;;
+    *)
+        return 0
+        ;;
+    esac
+
+    kldload nullfs 2>/dev/null
+
+    R=/tmp/liveroot
+    rm -rf "$R"
+    mkdir -p "$R/etc"
+    cp /etc/master.passwd /etc/group "$R/etc/"
+
+    # lightdm greeter needs a writable home for its Xauthority; on the
+    # read-only live CD /nonexistent is not writable, so point it to tmpfs.
+    mkdir -p /tmp/lightdm-home
+
+    # Dynamic IDs above 1000 (ports service account range on this live image).
+    maxgid=$(awk -F: '{ if ($3+0 > m) m = $3+0 } END { print m+0 }' "$R/etc/group")
+    [ "$maxgid" -lt 1000 ] && maxgid=1000
+    maxuid=$(awk -F: '{ if ($3+0 > m) m = $3+0 } END { print m+0 }' "$R/etc/master.passwd")
+    [ "$maxuid" -lt 1000 ] && maxuid=1000
+
+    # Groups: name -> extra members
+    addgroup() { # name [members]
+        grep -q "^$1:" "$R/etc/group" && return 0
+        maxgid=$((maxgid + 1))
+        echo "$1:*:$maxgid:$2" >> "$R/etc/group"
+    }
+    add_to_group() { # group user
+        local grp="$1" mem="$2"
+        if grep -q "^$grp:" "$R/etc/group"; then
+            awk -F: -v g="$grp" -v m="$mem" '
+                $1 == g { if ($4 == "") $4 = m; else $4 = $4 "," m }
+                { OFS=":"; print }
+            ' "$R/etc/group" > "$R/etc/group.new" \
+                && mv "$R/etc/group.new" "$R/etc/group"
+        fi
+    }
+    adduser() { # name [supplementary group] [home]
+        local gid home
+        grep -q "^$1:" "$R/etc/master.passwd" && return 0
+        maxuid=$((maxuid + 1))
+        addgroup "$1"
+        gid=$(awk -F: "\$1==\"$1\" { print \$3 }" "$R/etc/group")
+        home=${3:-/nonexistent}
+        # master.passwd: name:passwd:uid:gid:class:change:expire:gecos:home:shell
+        echo "$1:*:$maxuid:$gid::0:0:$1 daemon:$home:/usr/sbin/nologin" \
+            >> "$R/etc/master.passwd"
+        [ -n "$2" ] && add_to_group "$2" "$1"
+    }
+
+    addgroup video
+    adduser messagebus
+    adduser lightdm video /tmp/lightdm-home
+    adduser avahi
+    adduser polkitd
+    adduser cups
+    adduser colord
+    # lightdm needs ownership of its writable home
+    chown "$(awk -F: '/^lightdm:/ { print $3 ":" $4 }' "$R/etc/master.passwd")" \
+        /tmp/lightdm-home 2>/dev/null || true
+
+    # Set the live root password ("minobsd") before pwd_mkdb. After the
+    # nullfs mounts, "pw" cannot create lock files in the read-only /etc.
+    ROOTHASH=$(openssl passwd -6 "minobsd" 2>/dev/null)
+    if [ -n "$ROOTHASH" ]; then
+        awk -F: -v h="$ROOTHASH" 'BEGIN { OFS=":" }
+            $1 == "root" { $2 = h } { print }' \
+            "$R/etc/master.passwd" > "$R/etc/master.passwd.new" \
+            && mv "$R/etc/master.passwd.new" "$R/etc/master.passwd"
+    fi
+
+    pwd_mkdb -d "$R/etc" "$R/etc/master.passwd"
+
+    for f in master.passwd group pwd.db spwd.db; do
+        if [ -f "$R/etc/$f" ]; then
+            mount_nullfs "$R/etc/$f" "/etc/$f"
+        fi
+    done
+}
+
+run_rc_command "$1"

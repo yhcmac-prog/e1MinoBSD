@@ -1,0 +1,11 @@
+  ___ _  __ _ _  _ ___ ___  ___  ___
+ / -_) ' \ _` | || |_  / _ \/ _ \/ -_)
+ \___|_||_\__, |\_,_/___\___/\___\___|
+             |_|
+
+ Welcome to e1MinoBSD 1.0 (Mino) - a new BSD distribution
+ Built on FreeBSD 14.5-RELEASE. Live media (read-only).
+
+ * Install to disk : setup-minobsd
+ * Package manager : e1pkg (e1MinoBSD) / pkg (FreeBSD)
+ * Default login   : root (no password on live media)

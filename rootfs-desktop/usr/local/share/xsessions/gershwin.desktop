@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Gershwin
+Comment=Gershwin desktop environment
+Exec=/usr/local/sbin/gershwin-session
+Type=Application
+DesktopNames=Gershwin

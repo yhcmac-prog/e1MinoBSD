@@ -1,0 +1,4 @@
+name=minofetch
+version=1.0
+summary=e1MinoBSD system information script
+depends=hello

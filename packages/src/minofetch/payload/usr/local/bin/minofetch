@@ -1,0 +1,13 @@
+#!/bin/sh
+# minofetch - tiny system information display for e1MinoBSD
+. /etc/brand.conf 2>/dev/null
+kernel=$(uname -sr)
+arch=$(uname -m)
+user=${USER:-root}
+shell=$(basename "${SHELL:-/bin/sh}")
+printf '\033[1;36m        __ _  _ _ \033[0m   %s\@%s\n' "$user" "$(hostname)"
+printf '\033[1;36m  ___ / _` || | |\033[0m   OS: %s %s (%s)\n' "$NAME" "$VERSION" "$CODENAME"
+printf '\033[1;36m / -_) (_| || | |\033[0m   Base: %s\n' "$BASE"
+printf '\033[1;36m \\___|\\__,_||_|_|\033[0m   Kernel: %s\n' "$kernel"
+printf '\033[1;36m                \033[0m   Arch: %s\n' "$arch"
+printf '\033[1;36m                \033[0m   Shell: %s\n' "$shell"

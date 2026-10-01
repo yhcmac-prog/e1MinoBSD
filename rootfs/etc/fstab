@@ -1,0 +1,2 @@
+# e1MinoBSD live media - read-only CD root
+/dev/cd0 / cd9660 ro 0 0

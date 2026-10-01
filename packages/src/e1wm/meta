@@ -1,0 +1,4 @@
+name=e1wm
+version=1.0
+summary=e1wm framebuffer window manager (workstation/mobile)
+depends=
