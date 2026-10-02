@@ -2,6 +2,7 @@
 build/
 downloads/
 .vbox/
+.upload/
 .DS_Store
 
 # Compiled intermediates in package sources (keep payload + meta + .c/.h)
