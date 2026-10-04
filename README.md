@@ -40,7 +40,7 @@ sudo E1BSD_VARIANT=minimal ./build.sh     # 最小版
 
 产物位于 `build/e1MinoBSD-1.0-<variant>-amd64.iso`。
 
-详细构建说明见 [docs/BUILD.md](docs/BUILD.md)，日常使用见 [docs/USAGE.md](docs/USAGE.md)。
+详细构建说明见 [docs/BUILD.md](docs/BUILD.md)，日常使用见 [docs/USAGE.md](docs/USAGE.md)，贡献代码见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 目录结构
 
